@@ -7,12 +7,11 @@ import {
   ChevronDown, Loader2
 } from 'lucide-react';
 
-// Firebase Imports
+// --- Firebase 初始化設定 ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
 
-// --- Firebase 初始化設定 ---
 let app, auth, db, appId = 'default-app-id';
 try {
   let firebaseConfigObj = null;
@@ -21,16 +20,19 @@ try {
     firebaseConfigObj = JSON.parse(__firebase_config);
     appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   } 
-  else if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
+  else {
+    // 為了避免打包工具報錯，使用較安全的方式讀取環境變數
     try {
-      let envStr = import.meta.env.VITE_FIREBASE_CONFIG;
-      // 防呆：移除可能因為複製貼上多出來的頭尾單引號
-      if (envStr.startsWith("'") && envStr.endsWith("'")) {
-        envStr = envStr.slice(1, -1);
+      const getEnv = new Function('return import.meta.env.VITE_FIREBASE_CONFIG');
+      let envStr = getEnv();
+      if (envStr) {
+        if (envStr.startsWith("'") && envStr.endsWith("'")) {
+          envStr = envStr.slice(1, -1);
+        }
+        firebaseConfigObj = JSON.parse(envStr);
       }
-      firebaseConfigObj = JSON.parse(envStr);
     } catch (parseError) {
-      console.error("Firebase JSON 格式解析失敗:", parseError);
+      // 忽略找不到變數的錯誤，退回本地模式
     }
   }
 
@@ -70,7 +72,7 @@ const CURRENCIES = {
   EUR: { symbol: '€', rate: 0.13, label: '歐元' },
 };
 
-// 動態載入外部腳本 (供真實 PDF 生成使用)
+// 動態載入外部腳本 (供真實 PDF 生成使用，避免 Vite 打包錯誤)
 const loadScript = (src) => new Promise((resolve, reject) => {
   if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
   const script = document.createElement('script');
@@ -220,7 +222,7 @@ export default function App() {
     try {
       setIsGeneratingPDF(true);
       
-      // 動態載入套件
+      // 動態載入套件 (CDN)
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
       
@@ -318,9 +320,8 @@ export default function App() {
   const checkFirebaseStatus = () => {
     let envStr = null;
     try {
-      if (typeof import.meta !== 'undefined' && import.meta.env) {
-        envStr = import.meta.env.VITE_FIREBASE_CONFIG;
-      }
+      const getEnv = new Function('return import.meta.env.VITE_FIREBASE_CONFIG');
+      envStr = getEnv();
     } catch (e) {
       // 忽略錯誤
     }
@@ -331,7 +332,7 @@ export default function App() {
     console.log("3. 登入狀態:", fbUser ? `已登入 (${fbUser.uid})` : "未登入");
 
     if (!app) {
-      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? '格式似乎錯誤' : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串。\n3. 按下「重新部署 (Redeploy)」。`);
+      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? '格式似乎錯誤' : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串（首尾不要有單引號）。\n3. 按下「重新部署 (Redeploy)」。`);
     } else if (!fbUser) {
       alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication > Sign-in method 啟用「Anonymous (匿名)」登入。");
     } else {
@@ -729,7 +730,7 @@ export default function App() {
       )}
 
       {/* ========================================== */}
-      {/* 彈出視窗：CRUD 共用編輯彈窗 (修復完整欄位) */}
+      {/* 彈出視窗：CRUD 共用編輯彈窗 */}
       {/* ========================================== */}
       {editModal.isOpen && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[600] flex items-center justify-center p-4">
@@ -783,7 +784,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* 這裡已經修復：將使用者表單的完整欄位補齊 */}
               {editModal.type === 'user' && (
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-5">
