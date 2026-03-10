@@ -21,9 +21,8 @@ try {
     appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   } 
   else {
-    // 為了避免打包工具報錯，使用較安全的方式讀取環境變數
     try {
-      const getEnv = new Function('return import.meta.env.VITE_FIREBASE_CONFIG');
+      const getEnv = new Function('return typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_FIREBASE_CONFIG : null;');
       let envStr = getEnv();
       if (envStr) {
         if (envStr.startsWith("'") && envStr.endsWith("'")) {
@@ -32,7 +31,7 @@ try {
         firebaseConfigObj = JSON.parse(envStr);
       }
     } catch (parseError) {
-      // 忽略找不到變數的錯誤，退回本地模式
+      // 忽略錯誤
     }
   }
 
@@ -72,14 +71,14 @@ const CURRENCIES = {
   EUR: { symbol: '€', rate: 0.13, label: '歐元' },
 };
 
-// 動態載入外部腳本 (供真實 PDF 生成使用，避免 Vite 打包錯誤)
+// 動態載入外部腳本 (供真實 PDF 生成使用，避免打包環境報錯)
 const loadScript = (src) => new Promise((resolve, reject) => {
   if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
   const script = document.createElement('script');
   script.src = src;
   script.onload = resolve;
   script.onerror = reject;
-  document.body.appendChild(script);
+  document.head.appendChild(script);
 });
 
 export default function App() {
@@ -217,20 +216,25 @@ export default function App() {
 
   const totals = useMemo(() => calculateTotals(currentQuote), [currentQuote]);
 
-  // --- 改進版：真實 PDF 生成與下載 (使用 CDN 載入以相容各種環境) ---
+  // --- 改進版：解決 oklch 錯誤的 PDF 生成與下載 ---
   const downloadAsPDF = async (quote) => {
     try {
       setIsGeneratingPDF(true);
       
-      // 動態載入套件 (CDN)
+      // 動態載入 CDN 套件
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
       
       const element = document.getElementById('pdf-preview-content');
       if (!element) throw new Error("找不到 PDF 預覽畫面區塊");
       
-      // 使用 window 下的全域變數
-      const canvas = await window.html2canvas(element, { scale: 2, useCORS: true, logging: false });
+      // html2canvas 擷取設定
+      const canvas = await window.html2canvas(element, { 
+        scale: 2, 
+        useCORS: true, 
+        logging: false,
+        backgroundColor: '#ffffff'
+      });
       const imgData = canvas.toDataURL('image/png');
       
       const { jsPDF } = window.jspdf;
@@ -316,23 +320,23 @@ export default function App() {
     } catch(err) { console.error(err); alert('資料刪除失敗'); }
   };
 
-  // 測試 Firebase 專用函式 (升級版提示)
+  // 測試 Firebase 專用函式
   const checkFirebaseStatus = () => {
     let envStr = null;
     try {
-      const getEnv = new Function('return import.meta.env.VITE_FIREBASE_CONFIG');
+      const getEnv = new Function('return typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_FIREBASE_CONFIG : null;');
       envStr = getEnv();
     } catch (e) {
       // 忽略錯誤
     }
-
+    
     console.log("=== Firebase 狀態檢測 ===");
     console.log("1. 讀取到的環境變數:", envStr || "無");
     console.log("2. 解析後的 Firebase APP:", app ? "成功" : "失敗");
     console.log("3. 登入狀態:", fbUser ? `已登入 (${fbUser.uid})` : "未登入");
 
     if (!app) {
-      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? '格式似乎錯誤' : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串（首尾不要有單引號）。\n3. 按下「重新部署 (Redeploy)」。`);
+      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? envStr : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串（首尾不要有單引號）。\n3. 按下「重新部署 (Redeploy)」。`);
     } else if (!fbUser) {
       alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication > Sign-in method 啟用「Anonymous (匿名)」登入。");
     } else {
@@ -656,7 +660,7 @@ export default function App() {
       </main>
 
       {/* ========================================== */}
-      {/* 彈出視窗：PDF 預覽與渲染視窗 */}
+      {/* 彈出視窗：PDF 預覽與渲染視窗 (避開 oklch) */}
       {/* ========================================== */}
       {showPreview && (
         <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[500] flex items-center justify-center p-4">
@@ -667,39 +671,45 @@ export default function App() {
             </div>
             
             <div className="flex-grow bg-slate-300 p-8 overflow-y-auto flex justify-center">
-               <div id="pdf-preview-content" className="bg-white w-[210mm] min-h-[297mm] p-16 text-slate-900 shadow-2xl shrink-0" style={{boxSizing: 'border-box'}}>
-                  <div className="flex justify-between items-start border-b-4 border-slate-900 pb-10 mb-10">
+               {/* 替換所有會產生 oklch 的 class，改用 style 硬性注入標準 HEX 色碼 */}
+               <div id="pdf-preview-content" className="w-[210mm] min-h-[297mm] p-16 shadow-2xl shrink-0" style={{ boxSizing: 'border-box', backgroundColor: '#ffffff', color: '#0f172a' }}>
+                  <div className="flex justify-between items-start pb-10 mb-10" style={{ borderBottom: '4px solid #0f172a' }}>
                     <div>
-                      <h1 className="text-5xl font-black italic tracking-tighter mb-4 text-slate-900">LUMENS</h1>
-                      <p className="font-bold text-lg text-slate-700">Lumens Digital Optics Inc.</p>
-                      <p className="text-sm text-slate-500">2F, No. 101, Gongdao 5th Rd., Section 2, Hsinchu City</p>
+                      <h1 className="text-5xl font-black italic tracking-tighter mb-4" style={{ color: '#0f172a' }}>LUMENS</h1>
+                      <p className="font-bold text-lg" style={{ color: '#334155' }}>Lumens Digital Optics Inc.</p>
+                      <p className="text-sm" style={{ color: '#64748b' }}>2F, No. 101, Gongdao 5th Rd., Section 2, Hsinchu City</p>
                     </div>
                     <div className="text-right">
-                      <h2 className="text-5xl font-black text-slate-200 uppercase mb-6 tracking-widest">Quotation</h2>
-                      <div className="space-y-1 font-bold text-sm text-slate-600">
-                        <p>報價單號: <span className="font-mono text-slate-900">{currentQuote?.id}</span></p>
-                        <p>開立日期: <span className="text-slate-900">{currentQuote?.createdAt}</span></p>
-                        <p>專案承辦: <span className="text-slate-900">{currentQuote?.userName}</span></p>
+                      <h2 className="text-5xl font-black uppercase mb-6 tracking-widest" style={{ color: '#cbd5e1' }}>Quotation</h2>
+                      <div className="space-y-1 font-bold text-sm" style={{ color: '#475569' }}>
+                        <p>報價單號: <span className="font-mono" style={{ color: '#0f172a' }}>{currentQuote?.id}</span></p>
+                        <p>開立日期: <span style={{ color: '#0f172a' }}>{currentQuote?.createdAt}</span></p>
+                        <p>專案承辦: <span style={{ color: '#0f172a' }}>{currentQuote?.userName}</span></p>
                       </div>
                     </div>
                   </div>
                   
                   <div className="mb-12">
-                    <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b-2 border-slate-100 pb-2 mb-4">客戶資訊 (Bill To)</h3>
-                    <p className="text-3xl font-black text-slate-800">{currentQuote?.customerName || '未指定客戶'}</p>
+                    <h3 className="text-[10px] font-black uppercase tracking-widest pb-2 mb-4" style={{ color: '#94a3b8', borderBottom: '2px solid #f1f5f9' }}>客戶資訊 (Bill To)</h3>
+                    <p className="text-3xl font-black" style={{ color: '#1e293b' }}>{currentQuote?.customerName || '未指定客戶'}</p>
                   </div>
 
                   <table className="w-full text-left mb-16 border-collapse">
-                    <thead className="bg-slate-900 text-white">
-                       <tr className="text-sm font-bold uppercase tracking-widest"><th className="p-4 rounded-tl-lg">產品型號 (SKU)</th><th className="p-4">產品說明 (Description)</th><th className="p-4 text-center">數量 (QTY)</th><th className="p-4 text-right rounded-tr-lg">小計 (Amount)</th></tr>
+                    <thead style={{ backgroundColor: '#0f172a', color: '#ffffff' }}>
+                       <tr className="text-sm font-bold uppercase tracking-widest">
+                         <th className="p-4 rounded-tl-lg">產品型號 (SKU)</th>
+                         <th className="p-4">產品說明 (Description)</th>
+                         <th className="p-4 text-center">數量 (QTY)</th>
+                         <th className="p-4 text-right rounded-tr-lg">小計 (Amount)</th>
+                       </tr>
                     </thead>
-                    <tbody className="divide-y-2 border-b-4 border-slate-900">
+                    <tbody className="divide-y-2" style={{ borderBottom: '4px solid #0f172a', borderColor: '#e2e8f0' }}>
                       {currentQuote?.items.map((it, i) => (
                         <tr key={i} className="text-sm">
-                           <td className="p-4 font-black text-slate-800">{it.sku}</td>
-                           <td className="p-4 font-bold text-slate-600">{it.name}</td>
-                           <td className="p-4 text-center font-bold">{it.quantity}</td>
-                           <td className="p-4 text-right font-black text-slate-800">{CURRENCIES[currentQuote.currency].symbol} {it.subtotal.toLocaleString()}</td>
+                           <td className="p-4 font-black" style={{ color: '#1e293b' }}>{it.sku}</td>
+                           <td className="p-4 font-bold" style={{ color: '#475569' }}>{it.name}</td>
+                           <td className="p-4 text-center font-bold" style={{ color: '#0f172a' }}>{it.quantity}</td>
+                           <td className="p-4 text-right font-black" style={{ color: '#1e293b' }}>{CURRENCIES[currentQuote.currency].symbol} {it.subtotal.toLocaleString()}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -707,14 +717,22 @@ export default function App() {
 
                   <div className="flex justify-end mb-16">
                     <div className="w-80 space-y-4">
-                      <div className="flex justify-between font-bold text-slate-600"><span>小計 (Subtotal)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.subtotal.toLocaleString()}</span></div>
-                      <div className="flex justify-between font-bold text-slate-600"><span>稅金 (Tax 5%)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.tax.toLocaleString()}</span></div>
-                      <div className="flex justify-between items-center pt-4 border-t-4 border-slate-900 font-black text-2xl">
+                      <div className="flex justify-between font-bold" style={{ color: '#475569' }}><span>小計 (Subtotal)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.subtotal.toLocaleString()}</span></div>
+                      <div className="flex justify-between font-bold" style={{ color: '#475569' }}><span>稅金 (Tax 5%)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.tax.toLocaleString()}</span></div>
+                      <div className="flex justify-between items-center pt-4 font-black text-2xl" style={{ borderTop: '4px solid #0f172a', color: '#0f172a' }}>
                         <span>總計 (Total)</span>
-                        <span className="text-slate-900">{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.total.toLocaleString()}</span>
+                        <span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.total.toLocaleString()}</span>
                       </div>
                     </div>
                   </div>
+                  
+                  {/* PDF Footer Notes */}
+                  {currentQuote?.notes && (
+                     <div className="border-t-2 pt-8" style={{ borderColor: '#f1f5f9' }}>
+                       <h4 className="text-[10px] font-black uppercase tracking-widest mb-2" style={{ color: '#94a3b8' }}>條款與備註 (Terms & Notes)</h4>
+                       <p className="text-sm font-bold whitespace-pre-wrap" style={{ color: '#475569' }}>{currentQuote.notes}</p>
+                     </div>
+                  )}
                </div>
             </div>
             
@@ -730,7 +748,7 @@ export default function App() {
       )}
 
       {/* ========================================== */}
-      {/* 彈出視窗：CRUD 共用編輯彈窗 */}
+      {/* 彈出視窗：CRUD 共用編輯彈窗 (修復完整欄位) */}
       {/* ========================================== */}
       {editModal.isOpen && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[600] flex items-center justify-center p-4">
