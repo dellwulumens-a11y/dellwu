@@ -17,17 +17,21 @@ let app, auth, db, appId = 'default-app-id';
 try {
   let firebaseConfigObj = null;
   
-  // 1. 支援 Canvas 預覽環境
   if (typeof __firebase_config !== 'undefined') {
     firebaseConfigObj = JSON.parse(__firebase_config);
     appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   } 
-  // 2. 支援外部 Vite 部署環境 (從 .env 讀取)
   else if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
     try {
-      firebaseConfigObj = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
+      let envStr = import.meta.env.VITE_FIREBASE_CONFIG;
+      // 防呆：移除可能因為複製貼上多出來的頭尾單引號
+      if (envStr.startsWith("'") && envStr.endsWith("'")) {
+        envStr = envStr.slice(1, -1);
+      }
+      firebaseConfigObj = JSON.parse(envStr);
     } catch (parseError) {
       console.error("Firebase JSON 格式解析失敗:", parseError);
+      console.log("當前讀取到的環境變數字串為:", import.meta.env.VITE_FIREBASE_CONFIG);
     }
   }
 
@@ -40,7 +44,7 @@ try {
   console.error("Firebase 初始化失敗:", e);
 }
 
-// --- 初期預設資料 (容錯使用) ---
+// --- 初期預設資料 ---
 const INITIAL_PRODUCTS = [
   { id: 'vc-001', sku: 'VC-A71P', name: '4K IP PTZ 攝像機', spec: '4K 60fps, 30x 光學變焦, HDMI/SDI/Ethernet', category: 'VC攝像機', price: 2500 },
   { id: 'vc-002', sku: 'VC-A51P', name: 'Full HD IP PTZ 攝像機', spec: '1080p 60fps, 20x 光學變焦, PoE+', category: 'VC攝像機', price: 1800 },
@@ -87,7 +91,6 @@ export default function App() {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
 
-  // 資料狀態 (預先載入 INITIAL 資料作為容錯，避免畫面空白)
   const [activeTab, setActiveTab] = useState('quotes');
   const [products, setProducts] = useState(INITIAL_PRODUCTS);
   const [customers, setCustomers] = useState(INITIAL_CUSTOMERS);
@@ -116,7 +119,6 @@ export default function App() {
         }
       } catch (e) {
         console.error("Firebase Auth 錯誤:", e);
-        alert(`雲端資料庫連線失敗 (Auth Error)！\n\n系統已切換為「離線記憶體模式」，您仍可操作系統，但資料不會永久保存。\n\n錯誤代碼：${e.code}\n提示：請前往 Firebase Console 確認是否已啟用「Anonymous (匿名登入)」。`);
         setIsDbSyncing(false);
       }
     };
@@ -132,7 +134,6 @@ export default function App() {
 
     const checkAndSeed = (snap, collectionName, initialData, setter) => {
       if (snap.empty) {
-        // 若雲端為空，將預設資料寫入雲端
         initialData.forEach(item => setDoc(doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id), item));
       } else {
         setter(snap.docs.map(d => d.data()));
@@ -141,9 +142,6 @@ export default function App() {
 
     const handleFirestoreError = (err) => {
       console.error("Firestore 存取錯誤:", err);
-      if (err.code === 'permission-denied') {
-        alert("資料庫讀取權限被拒！\n\n系統已切換為「離線記憶體模式」。\n\n👉 解決方法：請前往 Firebase Firestore > Rules，將規則改為：\nallow read, write: if request.auth != null;");
-      }
       setIsDbSyncing(false);
     };
 
@@ -166,7 +164,6 @@ export default function App() {
     return () => { unsubProducts(); unsubCustomers(); unsubUsers(); unsubQuotes(); };
   }, [fbUser]);
 
-  // --- 系統登入邏輯 ---
   const handleLogin = (e) => {
     e.preventDefault();
     const user = users.find(u => u.username === loginForm.username && u.password === loginForm.password);
@@ -179,7 +176,6 @@ export default function App() {
 
   const handleLogout = () => { setIsLoggedIn(false); setCurrentUser(null); setLoginForm({ username: '', password: '' }); };
 
-  // --- 報價單建立邏輯 ---
   const generateQuoteID = () => {
     const now = new Date();
     const dateStr = now.toISOString().slice(2, 10).replace(/-/g, '');
@@ -220,16 +216,17 @@ export default function App() {
 
   const totals = useMemo(() => calculateTotals(currentQuote), [currentQuote]);
 
-  // --- 真實 PDF 生成與下載 ---
+  // --- 改進版：真實 PDF 生成與下載 ---
   const downloadAsPDF = async (quote) => {
     try {
       setIsGeneratingPDF(true);
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
       
-      const { jsPDF } = window.jspdf;
       const element = document.getElementById('pdf-preview-content');
+      if (!element) throw new Error("找不到 PDF 預覽畫面");
       
+      const { jsPDF } = window.jspdf;
       const canvas = await window.html2canvas(element, { scale: 2, useCORS: true, logging: false });
       const imgData = canvas.toDataURL('image/png');
       
@@ -264,7 +261,7 @@ export default function App() {
         await downloadAsPDF(currentQuote);
         setShowPreview(false);
         setIsCreating(false);
-      }, 500);
+      }, 800);
     } catch (err) {
       console.error(err); alert('儲存至資料庫失敗，請確認權限或網路連線。');
     }
@@ -315,19 +312,34 @@ export default function App() {
     } catch(err) { console.error(err); alert('資料刪除失敗'); }
   };
 
+  // 測試 Firebase 專用函式
+  const checkFirebaseStatus = () => {
+    console.log("=== Firebase 狀態檢測 ===");
+    console.log("1. 解析後的設定檔物件:", app ? app.options : "初始化失敗");
+    console.log("2. 登入狀態 (fbUser):", fbUser ? `已登入 UID: ${fbUser.uid}` : "未登入");
+    
+    if (!app) {
+      alert("❌ 錯誤：找不到 Firebase 設定檔。\n請確認 Zeabur 或 .env 的 VITE_FIREBASE_CONFIG 是否正確設定。");
+    } else if (!fbUser) {
+      alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication 啟用「Anonymous」登入。");
+    } else {
+      alert("✅ Firebase 連線與驗證正常！\n(詳情請按 F12 檢視 Console 面板)");
+    }
+  };
+
   // ==========================================
   // UI 渲染 (UI Rendering)
   // ==========================================
 
   if (!isLoggedIn) {
     return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans relative">
+      <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center p-4 font-sans relative">
         {isDbSyncing && (
            <div className="absolute top-4 right-4 bg-white px-4 py-2 rounded-lg shadow flex items-center gap-2 text-sm font-bold text-slate-500">
              <Loader2 size={16} className="animate-spin text-blue-600" /> 雲端連線中...
            </div>
         )}
-        <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden border border-slate-100">
+        <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden border border-slate-100 mb-6">
           <div className="bg-slate-900 p-10 text-white text-center">
             <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center font-black text-3xl italic mx-auto mb-4 shadow-lg shadow-blue-500/30">L</div>
             <h1 className="text-2xl font-bold tracking-tight">LUMENS 產品報價系統</h1>
@@ -347,6 +359,9 @@ export default function App() {
             </button>
           </form>
         </div>
+        <button onClick={checkFirebaseStatus} className="text-slate-400 text-sm hover:text-blue-600 hover:underline">
+          👉 測試雲端資料庫連線狀態
+        </button>
       </div>
     );
   }
@@ -702,7 +717,7 @@ export default function App() {
       )}
 
       {/* ========================================== */}
-      {/* 彈出視窗：CRUD 共用編輯彈窗 */}
+      {/* 彈出視窗：CRUD 共用編輯彈窗 (修復完整欄位) */}
       {/* ========================================== */}
       {editModal.isOpen && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[600] flex items-center justify-center p-4">
@@ -736,6 +751,7 @@ export default function App() {
                   </div>
                 </div>
               )}
+
               {editModal.type === 'customer' && (
                 <div className="space-y-5">
                   <div className="space-y-2">
@@ -747,19 +763,57 @@ export default function App() {
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">聯絡人</label>
                       <input type="text" required value={editModal.data.contact} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, contact: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
-                  </div>
-                </div>
-              )}
-              {editModal.type === 'user' && (
-                <div className="space-y-5">
-                  <div className="grid grid-cols-2 gap-5">
                     <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">登入帳號</label>
-                      <input type="text" required value={editModal.data.username} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, username: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">電子信箱</label>
+                      <input type="email" required value={editModal.data.email} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, email: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                 </div>
               )}
+
+              {/* 這裡已經修復：將使用者表單的完整欄位補齊 */}
+              {editModal.type === 'user' && (
+                <div className="space-y-5">
+                  <div className="grid grid-cols-2 gap-5">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">登入帳號 (Username)</label>
+                      <input type="text" required value={editModal.data.username} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, username: e.target.value } })} disabled={editModal.mode === 'edit'} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">登入密碼</label>
+                      <input type="password" required={editModal.mode === 'add'} placeholder={editModal.mode === 'edit' ? "輸入以變更密碼" : "輸入新密碼"} value={editModal.data.password} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, password: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-5">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">員工真實姓名</label>
+                      <input type="text" required value={editModal.data.name} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, name: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">角色權限</label>
+                      <select value={editModal.data.role} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, role: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
+                        <option value="User">一般使用者 (User)</option>
+                        <option value="Admin">管理者 (Admin)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">所屬單位 / 公司</label>
+                    <input type="text" value={editModal.data.company} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, company: e.target.value } })} placeholder="例如: LUMENS 總部" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-5">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">聯絡電話</label>
+                      <input type="text" value={editModal.data.contact} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, contact: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">電子信箱</label>
+                      <input type="email" value={editModal.data.email} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, email: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-10 flex justify-end gap-3">
                 <button type="button" onClick={() => setEditModal({ isOpen: false, type: '', mode: 'add', data: null })} className="px-6 py-3 font-bold text-slate-500 hover:text-slate-700">取消</button>
                 <button type="submit" className="px-10 py-3 bg-blue-600 text-white rounded-xl font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition">確認儲存</button>
