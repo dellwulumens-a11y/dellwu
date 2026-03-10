@@ -31,7 +31,6 @@ try {
       firebaseConfigObj = JSON.parse(envStr);
     } catch (parseError) {
       console.error("Firebase JSON 格式解析失敗:", parseError);
-      console.log("當前讀取到的環境變數字串為:", import.meta.env.VITE_FIREBASE_CONFIG);
     }
   }
 
@@ -216,20 +215,23 @@ export default function App() {
 
   const totals = useMemo(() => calculateTotals(currentQuote), [currentQuote]);
 
-  // --- 改進版：真實 PDF 生成與下載 ---
+  // --- 改進版：真實 PDF 生成與下載 (使用 CDN 載入以相容各種環境) ---
   const downloadAsPDF = async (quote) => {
     try {
       setIsGeneratingPDF(true);
+      
+      // 動態載入套件
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
       
       const element = document.getElementById('pdf-preview-content');
-      if (!element) throw new Error("找不到 PDF 預覽畫面");
+      if (!element) throw new Error("找不到 PDF 預覽畫面區塊");
       
-      const { jsPDF } = window.jspdf;
+      // 使用 window 下的全域變數
       const canvas = await window.html2canvas(element, { scale: 2, useCORS: true, logging: false });
       const imgData = canvas.toDataURL('image/png');
       
+      const { jsPDF } = window.jspdf;
       const pdf = new jsPDF('p', 'mm', 'a4');
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
@@ -239,7 +241,7 @@ export default function App() {
       
     } catch (err) {
       console.error("PDF 生成失敗:", err);
-      alert("PDF 產出失敗，請檢查網路狀態或瀏覽器擴充功能攔截。");
+      alert(`PDF 產出失敗：${err.message}\n請檢查網路狀態或確認沒有被瀏覽器擴充功能阻擋。`);
     } finally {
       setIsGeneratingPDF(false);
     }
@@ -312,18 +314,28 @@ export default function App() {
     } catch(err) { console.error(err); alert('資料刪除失敗'); }
   };
 
-  // 測試 Firebase 專用函式
+  // 測試 Firebase 專用函式 (升級版提示)
   const checkFirebaseStatus = () => {
+    let envStr = null;
+    try {
+      if (typeof import.meta !== 'undefined' && import.meta.env) {
+        envStr = import.meta.env.VITE_FIREBASE_CONFIG;
+      }
+    } catch (e) {
+      // 忽略錯誤
+    }
+
     console.log("=== Firebase 狀態檢測 ===");
-    console.log("1. 解析後的設定檔物件:", app ? app.options : "初始化失敗");
-    console.log("2. 登入狀態 (fbUser):", fbUser ? `已登入 UID: ${fbUser.uid}` : "未登入");
-    
+    console.log("1. 讀取到的環境變數:", envStr || "無");
+    console.log("2. 解析後的 Firebase APP:", app ? "成功" : "失敗");
+    console.log("3. 登入狀態:", fbUser ? `已登入 (${fbUser.uid})` : "未登入");
+
     if (!app) {
-      alert("❌ 錯誤：找不到 Firebase 設定檔。\n請確認 Zeabur 或 .env 的 VITE_FIREBASE_CONFIG 是否正確設定。");
+      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? '格式似乎錯誤' : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串。\n3. 按下「重新部署 (Redeploy)」。`);
     } else if (!fbUser) {
-      alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication 啟用「Anonymous」登入。");
+      alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication > Sign-in method 啟用「Anonymous (匿名)」登入。");
     } else {
-      alert("✅ Firebase 連線與驗證正常！\n(詳情請按 F12 檢視 Console 面板)");
+      alert("✅ Firebase 連線與驗證完全正常！\n您可以開始將資料寫入雲端資料庫了。");
     }
   };
 
@@ -359,8 +371,8 @@ export default function App() {
             </button>
           </form>
         </div>
-        <button onClick={checkFirebaseStatus} className="text-slate-400 text-sm hover:text-blue-600 hover:underline">
-          👉 測試雲端資料庫連線狀態
+        <button onClick={checkFirebaseStatus} className="text-slate-400 text-sm hover:text-blue-600 hover:underline bg-white px-4 py-2 rounded-full shadow-sm">
+          👉 點我測試雲端資料庫連線狀態
         </button>
       </div>
     );
