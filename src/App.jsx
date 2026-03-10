@@ -21,17 +21,24 @@ try {
     appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   } 
   else {
+    // 支援標準 Vite 讀取環境變數
+    let envStr;
     try {
-      const getEnv = new Function('return typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_FIREBASE_CONFIG : null;');
-      let envStr = getEnv();
-      if (envStr) {
-        if (envStr.startsWith("'") && envStr.endsWith("'")) {
-          envStr = envStr.slice(1, -1);
-        }
-        firebaseConfigObj = JSON.parse(envStr);
-      }
-    } catch (parseError) {
+      envStr = import.meta.env.VITE_FIREBASE_CONFIG;
+    } catch (e) {
       // 忽略錯誤
+    }
+
+    if (envStr) {
+      // 防呆：移除可能因為複製貼上多出來的單引號
+      if (envStr.startsWith("'") && envStr.endsWith("'")) {
+        envStr = envStr.slice(1, -1);
+      }
+      try {
+        firebaseConfigObj = JSON.parse(envStr);
+      } catch (parseError) {
+        console.error("Firebase JSON 格式解析失敗:", parseError);
+      }
     }
   }
 
@@ -324,8 +331,7 @@ export default function App() {
   const checkFirebaseStatus = () => {
     let envStr = null;
     try {
-      const getEnv = new Function('return typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_FIREBASE_CONFIG : null;');
-      envStr = getEnv();
+      envStr = import.meta.env.VITE_FIREBASE_CONFIG;
     } catch (e) {
       // 忽略錯誤
     }
@@ -336,7 +342,7 @@ export default function App() {
     console.log("3. 登入狀態:", fbUser ? `已登入 (${fbUser.uid})` : "未登入");
 
     if (!app) {
-      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? envStr : '空值 (undefined)'}\n\n📍 【重要提示】：您目前部署在 Zeabur 上，無法讀取您電腦的 .env.local。\n👉 解決方法：\n1. 前往 Zeabur 控制台 > 您的專案 > 環境變數。\n2. 新增變數「VITE_FIREBASE_CONFIG」，貼上 JSON 字串（首尾不要有單引號）。\n3. 按下「重新部署 (Redeploy)」。`);
+      alert(`❌ 錯誤：找不到 Firebase 設定檔。\n\n目前系統讀取到的變數值為：\n${envStr ? envStr : '空值 (undefined)'}\n\n📍 【重要提示】：因為您部署在 Zeabur，環境變數是在「打包時」寫入的。\n👉 解決方法：\n請前往 Zeabur 控制台點擊「重新部署 (Redeploy)」按鈕！`);
     } else if (!fbUser) {
       alert("❌ 錯誤：Firebase 匿名登入失敗。\n請至 Firebase Console > Authentication > Sign-in method 啟用「Anonymous (匿名)」登入。");
     } else {
@@ -671,66 +677,71 @@ export default function App() {
             </div>
             
             <div className="flex-grow bg-slate-300 p-8 overflow-y-auto flex justify-center">
-               {/* 替換所有會產生 oklch 的 class，改用 style 硬性注入標準 HEX 色碼 */}
-               <div id="pdf-preview-content" className="w-[210mm] min-h-[297mm] p-16 shadow-2xl shrink-0" style={{ boxSizing: 'border-box', backgroundColor: '#ffffff', color: '#0f172a' }}>
-                  <div className="flex justify-between items-start pb-10 mb-10" style={{ borderBottom: '4px solid #0f172a' }}>
+               {/* 完全移除 Tailwind 顏色 Class，改用原生 style 注入 HEX 色碼，徹底解決 oklch 錯誤 */}
+               <div id="pdf-preview-content" style={{ width: '210mm', minHeight: '297mm', padding: '60px', boxSizing: 'border-box', backgroundColor: '#ffffff', color: '#000000', fontFamily: 'sans-serif', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)' }}>
+                  
+                  {/* PDF 表頭區塊 */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '4px solid #0f172a', paddingBottom: '40px', marginBottom: '40px' }}>
                     <div>
-                      <h1 className="text-5xl font-black italic tracking-tighter mb-4" style={{ color: '#0f172a' }}>LUMENS</h1>
-                      <p className="font-bold text-lg" style={{ color: '#334155' }}>Lumens Digital Optics Inc.</p>
-                      <p className="text-sm" style={{ color: '#64748b' }}>2F, No. 101, Gongdao 5th Rd., Section 2, Hsinchu City</p>
+                      <h1 style={{ fontSize: '48px', fontWeight: '900', fontStyle: 'italic', letterSpacing: '-2px', margin: '0 0 16px 0', color: '#0f172a' }}>LUMENS</h1>
+                      <p style={{ fontWeight: 'bold', fontSize: '18px', margin: '0 0 8px 0', color: '#334155' }}>Lumens Digital Optics Inc.</p>
+                      <p style={{ fontSize: '14px', margin: '0', color: '#64748b' }}>2F, No. 101, Gongdao 5th Rd., Section 2, Hsinchu City</p>
                     </div>
-                    <div className="text-right">
-                      <h2 className="text-5xl font-black uppercase mb-6 tracking-widest" style={{ color: '#cbd5e1' }}>Quotation</h2>
-                      <div className="space-y-1 font-bold text-sm" style={{ color: '#475569' }}>
-                        <p>報價單號: <span className="font-mono" style={{ color: '#0f172a' }}>{currentQuote?.id}</span></p>
-                        <p>開立日期: <span style={{ color: '#0f172a' }}>{currentQuote?.createdAt}</span></p>
-                        <p>專案承辦: <span style={{ color: '#0f172a' }}>{currentQuote?.userName}</span></p>
+                    <div style={{ textAlign: 'right' }}>
+                      <h2 style={{ fontSize: '36px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '4px', margin: '0 0 24px 0', color: '#cbd5e1' }}>Quotation</h2>
+                      <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#475569', lineHeight: '1.8' }}>
+                        <p style={{ margin: '0' }}>報價單號: <span style={{ fontFamily: 'monospace', color: '#0f172a' }}>{currentQuote?.id}</span></p>
+                        <p style={{ margin: '0' }}>開立日期: <span style={{ color: '#0f172a' }}>{currentQuote?.createdAt}</span></p>
+                        <p style={{ margin: '0' }}>專案承辦: <span style={{ color: '#0f172a' }}>{currentQuote?.userName}</span></p>
                       </div>
                     </div>
                   </div>
                   
-                  <div className="mb-12">
-                    <h3 className="text-[10px] font-black uppercase tracking-widest pb-2 mb-4" style={{ color: '#94a3b8', borderBottom: '2px solid #f1f5f9' }}>客戶資訊 (Bill To)</h3>
-                    <p className="text-3xl font-black" style={{ color: '#1e293b' }}>{currentQuote?.customerName || '未指定客戶'}</p>
+                  {/* PDF 客戶資訊區塊 */}
+                  <div style={{ marginBottom: '48px' }}>
+                    <h3 style={{ fontSize: '12px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '2px', paddingBottom: '8px', marginBottom: '16px', borderBottom: '2px solid #f1f5f9', color: '#94a3b8', margin: '0' }}>客戶資訊 (Bill To)</h3>
+                    <p style={{ fontSize: '30px', fontWeight: '900', margin: '0', color: '#1e293b' }}>{currentQuote?.customerName || '未指定客戶'}</p>
                   </div>
 
-                  <table className="w-full text-left mb-16 border-collapse">
+                  {/* PDF 項目表格區塊 */}
+                  <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', marginBottom: '64px' }}>
                     <thead style={{ backgroundColor: '#0f172a', color: '#ffffff' }}>
-                       <tr className="text-sm font-bold uppercase tracking-widest">
-                         <th className="p-4 rounded-tl-lg">產品型號 (SKU)</th>
-                         <th className="p-4">產品說明 (Description)</th>
-                         <th className="p-4 text-center">數量 (QTY)</th>
-                         <th className="p-4 text-right rounded-tr-lg">小計 (Amount)</th>
+                       <tr style={{ fontSize: '14px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                         <th style={{ padding: '16px' }}>產品型號 (SKU)</th>
+                         <th style={{ padding: '16px' }}>產品說明 (Description)</th>
+                         <th style={{ padding: '16px', textAlign: 'center' }}>數量 (QTY)</th>
+                         <th style={{ padding: '16px', textAlign: 'right' }}>小計 (Amount)</th>
                        </tr>
                     </thead>
-                    <tbody className="divide-y-2" style={{ borderBottom: '4px solid #0f172a', borderColor: '#e2e8f0' }}>
+                    <tbody>
                       {currentQuote?.items.map((it, i) => (
-                        <tr key={i} className="text-sm">
-                           <td className="p-4 font-black" style={{ color: '#1e293b' }}>{it.sku}</td>
-                           <td className="p-4 font-bold" style={{ color: '#475569' }}>{it.name}</td>
-                           <td className="p-4 text-center font-bold" style={{ color: '#0f172a' }}>{it.quantity}</td>
-                           <td className="p-4 text-right font-black" style={{ color: '#1e293b' }}>{CURRENCIES[currentQuote.currency].symbol} {it.subtotal.toLocaleString()}</td>
+                        <tr key={i} style={{ borderBottom: '1px solid #e2e8f0', fontSize: '14px' }}>
+                           <td style={{ padding: '16px', fontWeight: '900', color: '#1e293b' }}>{it.sku}</td>
+                           <td style={{ padding: '16px', fontWeight: 'bold', color: '#475569' }}>{it.name}</td>
+                           <td style={{ padding: '16px', textAlign: 'center', fontWeight: 'bold', color: '#0f172a' }}>{it.quantity}</td>
+                           <td style={{ padding: '16px', textAlign: 'right', fontWeight: '900', color: '#1e293b' }}>{CURRENCIES[currentQuote.currency].symbol} {it.subtotal.toLocaleString()}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
 
-                  <div className="flex justify-end mb-16">
-                    <div className="w-80 space-y-4">
-                      <div className="flex justify-between font-bold" style={{ color: '#475569' }}><span>小計 (Subtotal)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.subtotal.toLocaleString()}</span></div>
-                      <div className="flex justify-between font-bold" style={{ color: '#475569' }}><span>稅金 (Tax 5%)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.tax.toLocaleString()}</span></div>
-                      <div className="flex justify-between items-center pt-4 font-black text-2xl" style={{ borderTop: '4px solid #0f172a', color: '#0f172a' }}>
+                  {/* PDF 金額總計區塊 */}
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '64px' }}>
+                    <div style={{ width: '320px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#475569', marginBottom: '16px' }}><span>小計 (Subtotal)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.subtotal.toLocaleString()}</span></div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#475569', marginBottom: '16px' }}><span>稅金 (Tax 5%)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.tax.toLocaleString()}</span></div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '16px', borderTop: '4px solid #0f172a', fontWeight: '900', fontSize: '24px', color: '#0f172a' }}>
                         <span>總計 (Total)</span>
                         <span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.total.toLocaleString()}</span>
                       </div>
                     </div>
                   </div>
                   
-                  {/* PDF Footer Notes */}
+                  {/* PDF 備註條款區塊 */}
                   {currentQuote?.notes && (
-                     <div className="border-t-2 pt-8" style={{ borderColor: '#f1f5f9' }}>
-                       <h4 className="text-[10px] font-black uppercase tracking-widest mb-2" style={{ color: '#94a3b8' }}>條款與備註 (Terms & Notes)</h4>
-                       <p className="text-sm font-bold whitespace-pre-wrap" style={{ color: '#475569' }}>{currentQuote.notes}</p>
+                     <div style={{ borderTop: '2px solid #f1f5f9', paddingTop: '32px' }}>
+                       <h4 style={{ fontSize: '12px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '2px', color: '#94a3b8', marginBottom: '8px', margin: '0' }}>條款與備註 (Terms & Notes)</h4>
+                       <p style={{ fontSize: '14px', fontWeight: 'bold', whiteSpace: 'pre-wrap', color: '#475569', margin: '0' }}>{currentQuote.notes}</p>
                      </div>
                   )}
                </div>
