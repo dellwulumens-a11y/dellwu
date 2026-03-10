@@ -57,6 +57,9 @@ export default function App() {
   // --- 產品連動選單狀態 ---
   const [tempSelection, setTempSelection] = useState({ category: '', sku: '', name: '' });
 
+  // --- CRUD Modal 狀態 ---
+  const [editModal, setEditModal] = useState({ isOpen: false, type: '', mode: 'add', data: null });
+
   // --- 登入邏輯 ---
   const handleLogin = (e) => {
     e.preventDefault();
@@ -137,6 +140,40 @@ export default function App() {
 
   const totals = useMemo(() => calculateTotals(currentQuote), [currentQuote]);
 
+  // --- CRUD 處理邏輯 (產品/客戶) ---
+  const openModal = (type, mode, item = null) => {
+    const initialData = item ? { ...item } : (
+      type === 'product'
+        ? { sku: '', name: '', spec: '', category: 'VC攝像機', price: 0 }
+        : { name: '', contact: '', email: '', level: '一般客戶', discount: 1.0, address: '' }
+    );
+    setEditModal({ isOpen: true, type, mode, data: initialData });
+  };
+
+  const handleSaveItem = (e) => {
+    e.preventDefault();
+    const { type, mode, data } = editModal;
+    if (type === 'product') {
+      if (mode === 'add') {
+        setProducts([{ ...data, id: `p-${Date.now()}` }, ...products]);
+      } else {
+        setProducts(products.map(p => p.id === data.id ? data : p));
+      }
+    } else if (type === 'customer') {
+      if (mode === 'add') {
+        setCustomers([{ ...data, id: `c-${Date.now()}` }, ...customers]);
+      } else {
+        setCustomers(customers.map(c => c.id === data.id ? data : c));
+      }
+    }
+    setEditModal({ isOpen: false, type: '', mode: 'add', data: null });
+  };
+
+  const handleDeleteItem = (type, id) => {
+    if (type === 'product') setProducts(products.filter(p => p.id !== id));
+    if (type === 'customer') setCustomers(customers.filter(c => c.id !== id));
+  };
+
   // 下載 PDF 邏輯
   const downloadAsPDF = (quote) => {
     // 這裡模擬 PDF 下載。在實際應用中，會呼叫後端 API 或使用 jsPDF。
@@ -190,7 +227,7 @@ export default function App() {
         <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
           <div className="bg-slate-900 p-8 text-white text-center">
             <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center font-black text-3xl italic mx-auto mb-4">L</div>
-            <h1 className="text-2xl font-bold tracking-tight">Lumens NPD 報價系統</h1>
+            <h1 className="text-2xl font-bold tracking-tight">LUMENS 產品報價</h1>
           </div>
           <form onSubmit={handleLogin} className="p-8 space-y-6">
             {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm flex items-center gap-2"><AlertCircle size={16} /> {loginError}</div>}
@@ -215,7 +252,7 @@ export default function App() {
       <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col shrink-0">
         <div className="flex items-center gap-2 mb-10">
           <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-xl italic">L</div>
-          <div><h1 className="font-bold text-lg leading-tight">Lumens NPD</h1><p className="text-xs text-slate-400 font-mono">{currentUser.role} Mode</p></div>
+          <div><h1 className="font-bold text-lg leading-tight">LUMENS 產品報價</h1><p className="text-xs text-slate-400 font-mono">{currentUser.role} Mode</p></div>
         </div>
         <nav className="space-y-2 flex-grow">
           <button onClick={() => {setActiveTab('quotes'); setIsCreating(false);}} className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition ${activeTab === 'quotes' ? 'bg-blue-600 shadow-lg shadow-blue-900/50' : 'hover:bg-slate-800 text-slate-400'}`}><FileText size={20} /> 報價系統</button>
@@ -240,9 +277,17 @@ export default function App() {
       <main className="flex-grow p-4 md:p-8 overflow-y-auto max-h-screen">
         <header className="flex justify-between items-center mb-8">
           <h2 className="text-2xl font-bold">{isCreating ? '建立新報價單' : activeTab === 'quotes' ? '報價記錄' : activeTab === 'products' ? '產品資料' : '客戶資料'}</h2>
-          {activeTab === 'quotes' && !isCreating && (
-            <button onClick={startNewQuote} className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md transition"><Plus size={18} /> 新增報價</button>
-          )}
+          <div className="flex gap-3">
+            {activeTab === 'quotes' && !isCreating && (
+              <button onClick={startNewQuote} className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md transition"><Plus size={18} /> 新增報價</button>
+            )}
+            {activeTab === 'products' && (
+              <button onClick={() => openModal('product', 'add')} className="flex items-center gap-2 px-6 py-2 bg-slate-900 text-white rounded-lg font-bold hover:bg-slate-800 shadow-md transition"><Plus size={18} /> 新增產品</button>
+            )}
+            {activeTab === 'customers' && (
+              <button onClick={() => openModal('customer', 'add')} className="flex items-center gap-2 px-6 py-2 bg-slate-900 text-white rounded-lg font-bold hover:bg-slate-800 shadow-md transition"><UserPlus size={18} /> 新增客戶</button>
+            )}
+          </div>
         </header>
 
         {/* 報價清單列表 */}
@@ -423,12 +468,60 @@ export default function App() {
           </div>
         )}
 
-        {/* 預留空間給產品庫/客戶管理 (Admin 功能) */}
+        {/* 產品庫管理 (Admin 功能) */}
         {activeTab === 'products' && (
-          <div className="text-center py-20 bg-white rounded-3xl border border-slate-200">
-            <Package size={48} className="mx-auto text-slate-200 mb-4" />
-            <h3 className="text-xl font-bold text-slate-400">產品庫管理模組</h3>
-            <p className="text-slate-400">管理員可在這裡新增或刪除基準產品資料</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {products.map(p => (
+              <div key={p.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition">
+                <div className="flex justify-between items-start mb-4">
+                  <span className="px-2 py-1 bg-blue-50 text-blue-600 rounded text-[10px] font-bold uppercase tracking-widest">{p.category}</span>
+                  <div className="flex gap-2">
+                    <button onClick={() => openModal('product', 'edit', p)} className="p-2 text-slate-400 hover:text-blue-600 transition bg-slate-50 rounded-lg"><Edit3 size={16}/></button>
+                    <button onClick={() => handleDeleteItem('product', p.id)} className="p-2 text-slate-400 hover:text-red-500 transition bg-slate-50 rounded-lg"><Trash2 size={16}/></button>
+                  </div>
+                </div>
+                <h4 className="font-bold text-lg mb-1">{p.sku}</h4>
+                <p className="text-sm text-slate-600 mb-2 font-medium">{p.name}</p>
+                <p className="text-xs text-slate-400 mb-4 h-8 overflow-hidden line-clamp-2">{p.spec}</p>
+                <div className="pt-4 border-t border-slate-100 flex justify-between items-center">
+                  <span className="text-xs text-slate-400 uppercase font-bold">標準定價</span>
+                  <span className="font-black text-slate-800">{CURRENCIES.CNY.symbol} {p.price.toLocaleString()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 客戶管理 (Admin 功能) */}
+        {activeTab === 'customers' && (
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <table className="w-full text-left">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold border-b border-slate-200">
+                <tr><th className="px-6 py-4">公司名稱</th><th className="px-6 py-4">聯繫人</th><th className="px-6 py-4">等級 / 折扣</th><th className="px-6 py-4">地址</th><th className="px-6 py-4 text-right">操作</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {customers.length === 0 ? <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">目前尚無客戶資料</td></tr> : (
+                  customers.map(c => (
+                    <tr key={c.id} className="hover:bg-slate-50 transition text-sm">
+                      <td className="px-6 py-4 font-bold text-slate-800">{c.name}</td>
+                      <td className="px-6 py-4">
+                        <p className="font-medium text-slate-700">{c.contact}</p>
+                        <p className="text-xs text-slate-400">{c.email}</p>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="px-2 py-1 bg-emerald-50 text-emerald-600 rounded text-[10px] font-bold mr-2">{c.level}</span>
+                        <span className="font-mono font-bold text-slate-500">{(c.discount * 100).toFixed(0)}%</span>
+                      </td>
+                      <td className="px-6 py-4 text-slate-500 text-xs">{c.address}</td>
+                      <td className="px-6 py-4 flex justify-end gap-2">
+                        <button onClick={() => openModal('customer', 'edit', c)} className="p-2 text-slate-400 hover:text-blue-600 transition bg-white border border-slate-100 shadow-sm rounded-lg"><Edit3 size={16} /></button>
+                        <button onClick={() => handleDeleteItem('customer', c.id)} className="p-2 text-slate-400 hover:text-red-500 transition bg-white border border-slate-100 shadow-sm rounded-lg"><Trash2 size={16} /></button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         )}
       </main>
@@ -486,6 +579,87 @@ export default function App() {
                   </div>
                </div>
              </div>
+          </div>
+        </div>
+      )}
+
+      {/* CRUD Modal (新增/編輯 產品與客戶) */}
+      {editModal.isOpen && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[400] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-6 border-b flex justify-between items-center bg-slate-50">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                {editModal.type === 'product' ? <Package size={20} className="text-blue-600" /> : <Users size={20} className="text-blue-600" />}
+                {editModal.mode === 'add' ? '新增' : '編輯'}{editModal.type === 'product' ? '產品資料' : '客戶資料'}
+              </h3>
+              <button onClick={() => setEditModal({ isOpen: false, type: '', mode: 'add', data: null })} className="p-2 hover:bg-slate-200 rounded-full transition"><X size={20}/></button>
+            </div>
+            <form onSubmit={handleSaveItem} className="p-6 overflow-y-auto max-h-[70vh]">
+              {editModal.type === 'product' && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">產品型號 (SKU)</label>
+                      <input type="text" required value={editModal.data.sku} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, sku: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">產品系列</label>
+                      <input type="text" required value={editModal.data.category} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, category: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: VC攝像機" />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500">產品名稱</label>
+                    <input type="text" required value={editModal.data.name} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, name: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500">規格說明</label>
+                    <textarea required value={editModal.data.spec} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, spec: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 h-20" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500">標準定價 (CNY)</label>
+                    <input type="number" required min="0" value={editModal.data.price} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, price: parseFloat(e.target.value) || 0 } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                </div>
+              )}
+
+              {editModal.type === 'customer' && (
+                <div className="space-y-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500">公司/客戶名稱</label>
+                    <input type="text" required value={editModal.data.name} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, name: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">聯絡人</label>
+                      <input type="text" required value={editModal.data.contact} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, contact: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">電子信箱</label>
+                      <input type="email" required value={editModal.data.email} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, email: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">客戶等級</label>
+                      <input type="text" required value={editModal.data.level} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, level: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: 經銷商 A" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-500">折扣率 (1.0 = 無折扣)</label>
+                      <input type="number" step="0.01" required min="0" max="1" value={editModal.data.discount} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, discount: parseFloat(e.target.value) || 1 } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500">聯絡地址</label>
+                    <input type="text" required value={editModal.data.address} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, address: e.target.value } })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                </div>
+              )}
+              
+              <div className="mt-8 pt-4 border-t border-slate-100 flex justify-end gap-3">
+                <button type="button" onClick={() => setEditModal({ isOpen: false, type: '', mode: 'add', data: null })} className="px-6 py-2 font-bold text-slate-500 hover:text-slate-700">取消</button>
+                <button type="submit" className="px-8 py-2 bg-blue-600 text-white rounded-lg font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition">儲存資料</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
