@@ -13,26 +13,42 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
 
 // --- Firebase 初始化設定 ---
-let app, auth, db, appId;
+let app, auth, db, appId = 'default-app-id';
 try {
+  let firebaseConfigObj = null;
+  
+  // 1. 支援 Canvas 預覽環境
   if (typeof __firebase_config !== 'undefined') {
-    const firebaseConfig = JSON.parse(__firebase_config);
-    app = initializeApp(firebaseConfig);
+    firebaseConfigObj = JSON.parse(__firebase_config);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+  } 
+  // 2. 支援外部 Vite 部署環境 (從 .env 讀取)
+  else if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
+    try {
+      firebaseConfigObj = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
+    } catch (parseError) {
+      console.error("Firebase JSON 格式解析失敗:", parseError);
+    }
+  }
+
+  if (firebaseConfigObj) {
+    app = initializeApp(firebaseConfigObj);
     auth = getAuth(app);
     db = getFirestore(app);
-    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
   }
 } catch (e) {
   console.error("Firebase 初始化失敗:", e);
 }
 
-// --- 初期預設資料 (供首次建立資料庫時寫入使用) ---
+// --- 初期預設資料 (容錯使用) ---
 const INITIAL_PRODUCTS = [
   { id: 'vc-001', sku: 'VC-A71P', name: '4K IP PTZ 攝像機', spec: '4K 60fps, 30x 光學變焦, HDMI/SDI/Ethernet', category: 'VC攝像機', price: 2500 },
   { id: 'vc-002', sku: 'VC-A51P', name: 'Full HD IP PTZ 攝像機', spec: '1080p 60fps, 20x 光學變焦, PoE+', category: 'VC攝像機', price: 1800 },
   { id: 'vc-003', sku: 'VC-TR40', name: 'AI 自動追蹤攝像機', spec: 'AI 智慧追蹤, 1080p, 20x 變焦, 雙鏡頭', category: 'VC攝像機', price: 2200 },
   { id: 'kb-001', sku: 'VS-KB30', name: 'IP 攝像機控制器', spec: '支援 VISCA/Pelco, LCD 顯示螢幕, 搖桿控制', category: 'KB控制器', price: 800 },
+  { id: 'kb-002', sku: 'VS-K20', name: '精簡型攝影機控制器', spec: 'USB/RS-232 控制, 五向按鈕', category: 'KB控制器', price: 450 },
   { id: 'oip-001', sku: 'OIP-D50C', name: '1G 分散式編解碼器', spec: '4K 傳輸, 網路控制, 低延遲', category: 'OIP橋接器', price: 1200 },
+  { id: 'oip-002', sku: 'OIP-N40', name: 'NDI|HX 轉接器', spec: 'HDMI 轉 NDI, PoE 供電', category: 'OIP橋接器', price: 950 },
 ];
 
 const INITIAL_CUSTOMERS = [
@@ -62,9 +78,8 @@ const loadScript = (src) => new Promise((resolve, reject) => {
 });
 
 export default function App() {
-  // --- 認證與雲端狀態 ---
   const [fbUser, setFbUser] = useState(null);
-  const [isDbSyncing, setIsDbSyncing] = useState(true);
+  const [isDbSyncing, setIsDbSyncing] = useState(!!auth);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -72,26 +87,24 @@ export default function App() {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
 
-  // --- 資料狀態 ---
+  // 資料狀態 (預先載入 INITIAL 資料作為容錯，避免畫面空白)
   const [activeTab, setActiveTab] = useState('quotes');
-  const [products, setProducts] = useState([]);
-  const [customers, setCustomers] = useState([]);
-  const [users, setUsers] = useState([]);
+  const [products, setProducts] = useState(INITIAL_PRODUCTS);
+  const [customers, setCustomers] = useState(INITIAL_CUSTOMERS);
+  const [users, setUsers] = useState(INITIAL_USERS);
   const [quotes, setQuotes] = useState([]);
   const [currency, setCurrency] = useState('CNY');
   
-  // --- 編輯狀態 ---
   const [isCreating, setIsCreating] = useState(false);
   const [currentQuote, setCurrentQuote] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
   const [tempSelection, setTempSelection] = useState({ category: '', sku: '', name: '' });
   const [editModal, setEditModal] = useState({ isOpen: false, type: '', mode: 'add', data: null });
 
-  // --- Firebase 連線與資料同步 ---
+  // --- Firebase 登入邏輯 ---
   useEffect(() => {
     if (!auth) {
-      // 若無 Firebase 環境，載入本地測試資料
-      setProducts(INITIAL_PRODUCTS); setCustomers(INITIAL_CUSTOMERS); setUsers(INITIAL_USERS); setIsDbSyncing(false);
+      setIsDbSyncing(false);
       return;
     }
     const initAuth = async () => {
@@ -101,45 +114,59 @@ export default function App() {
         } else {
           await signInAnonymously(auth);
         }
-      } catch (e) { console.error("Firebase Auth 錯誤", e); }
+      } catch (e) {
+        console.error("Firebase Auth 錯誤:", e);
+        alert(`雲端資料庫連線失敗 (Auth Error)！\n\n系統已切換為「離線記憶體模式」，您仍可操作系統，但資料不會永久保存。\n\n錯誤代碼：${e.code}\n提示：請前往 Firebase Console 確認是否已啟用「Anonymous (匿名登入)」。`);
+        setIsDbSyncing(false);
+      }
     };
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, setFbUser);
     return () => unsubscribe();
   }, []);
 
+  // --- Firebase 資料庫同步邏輯 ---
   useEffect(() => {
     if (!fbUser || !db) return;
     setIsDbSyncing(true);
 
     const checkAndSeed = (snap, collectionName, initialData, setter) => {
       if (snap.empty) {
+        // 若雲端為空，將預設資料寫入雲端
         initialData.forEach(item => setDoc(doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id), item));
       } else {
         setter(snap.docs.map(d => d.data()));
       }
     };
 
+    const handleFirestoreError = (err) => {
+      console.error("Firestore 存取錯誤:", err);
+      if (err.code === 'permission-denied') {
+        alert("資料庫讀取權限被拒！\n\n系統已切換為「離線記憶體模式」。\n\n👉 解決方法：請前往 Firebase Firestore > Rules，將規則改為：\nallow read, write: if request.auth != null;");
+      }
+      setIsDbSyncing(false);
+    };
+
     const unsubProducts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'products'), 
-      snap => checkAndSeed(snap, 'products', INITIAL_PRODUCTS, setProducts), err => console.error(err));
+      snap => checkAndSeed(snap, 'products', INITIAL_PRODUCTS, setProducts), handleFirestoreError);
       
     const unsubCustomers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'customers'), 
-      snap => checkAndSeed(snap, 'customers', INITIAL_CUSTOMERS, setCustomers), err => console.error(err));
+      snap => checkAndSeed(snap, 'customers', INITIAL_CUSTOMERS, setCustomers), handleFirestoreError);
       
     const unsubUsers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'users'), 
-      snap => checkAndSeed(snap, 'users', INITIAL_USERS, setUsers), err => console.error(err));
+      snap => checkAndSeed(snap, 'users', INITIAL_USERS, setUsers), handleFirestoreError);
       
     const unsubQuotes = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'quotes'), 
       snap => {
         const fetchedQuotes = snap.docs.map(d => d.data()).sort((a,b) => b.id.localeCompare(a.id));
         setQuotes(fetchedQuotes);
         setIsDbSyncing(false);
-      }, err => console.error(err));
+      }, handleFirestoreError);
 
     return () => { unsubProducts(); unsubCustomers(); unsubUsers(); unsubQuotes(); };
   }, [fbUser]);
 
-  // --- 登入邏輯 ---
+  // --- 系統登入邏輯 ---
   const handleLogin = (e) => {
     e.preventDefault();
     const user = users.find(u => u.username === loginForm.username && u.password === loginForm.password);
@@ -152,7 +179,7 @@ export default function App() {
 
   const handleLogout = () => { setIsLoggedIn(false); setCurrentUser(null); setLoginForm({ username: '', password: '' }); };
 
-  // --- 報價單邏輯 ---
+  // --- 報價單建立邏輯 ---
   const generateQuoteID = () => {
     const now = new Date();
     const dateStr = now.toISOString().slice(2, 10).replace(/-/g, '');
@@ -168,6 +195,12 @@ export default function App() {
       items: [], status: '已報價', currency: currency, taxRate: 0.05, notes: '', history: []
     });
     setIsCreating(true); setTempSelection({ category: '', sku: '', name: '' });
+  };
+
+  const handleCategoryChange = (cat) => setTempSelection({ category: cat, sku: '', name: '' });
+  const handleSkuChange = (sku) => {
+    const product = products.find(p => p.sku === sku);
+    if (product) setTempSelection({ ...tempSelection, sku: sku, name: product.name });
   };
 
   const confirmAddItem = () => {
@@ -187,7 +220,7 @@ export default function App() {
 
   const totals = useMemo(() => calculateTotals(currentQuote), [currentQuote]);
 
-  // --- 真實 PDF 下載邏輯 ---
+  // --- 真實 PDF 生成與下載 ---
   const downloadAsPDF = async (quote) => {
     try {
       setIsGeneratingPDF(true);
@@ -195,13 +228,11 @@ export default function App() {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
       
       const { jsPDF } = window.jspdf;
-      const element = document.getElementById('pdf-preview-content'); // 定位預覽區塊
+      const element = document.getElementById('pdf-preview-content');
       
-      // 擷取畫面
       const canvas = await window.html2canvas(element, { scale: 2, useCORS: true, logging: false });
       const imgData = canvas.toDataURL('image/png');
       
-      // 轉換為 A4 尺寸的 PDF
       const pdf = new jsPDF('p', 'mm', 'a4');
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
@@ -211,7 +242,7 @@ export default function App() {
       
     } catch (err) {
       console.error("PDF 生成失敗:", err);
-      alert("PDF 產出失敗，請檢查網路狀態後再試。");
+      alert("PDF 產出失敗，請檢查網路狀態或瀏覽器擴充功能攔截。");
     } finally {
       setIsGeneratingPDF(false);
     }
@@ -222,28 +253,24 @@ export default function App() {
     if (currentQuote.items.length === 0) return alert('請至少加入一個產品項目');
 
     try {
-      // 寫入 Firestore 資料庫
       if (db && fbUser) {
         await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'quotes', currentQuote.id), currentQuote);
       } else {
-        setQuotes([currentQuote, ...quotes]); // 備用方案
+        setQuotes([currentQuote, ...quotes]); 
       }
       
-      setShowPreview(true); // 先開啟預覽畫面供截圖
-      
-      // 延遲一小段時間確保 React 渲染出預覽畫面後再截圖
+      setShowPreview(true);
       setTimeout(async () => {
         await downloadAsPDF(currentQuote);
         setShowPreview(false);
         setIsCreating(false);
       }, 500);
-
     } catch (err) {
-      console.error(err); alert('儲存至資料庫失敗');
+      console.error(err); alert('儲存至資料庫失敗，請確認權限或網路連線。');
     }
   };
 
-  // --- CRUD 資料庫操作 (產品/客戶/使用者) ---
+  // --- CRUD (產品/客戶/帳號) 編輯 ---
   const openModal = (type, mode, item = null) => {
     let initialData = item ? { ...item } : (
       type === 'product' ? { sku: '', name: '', spec: '', category: 'VC攝像機', price: 0 }
@@ -264,12 +291,10 @@ export default function App() {
       if (db && fbUser) {
         await setDoc(doc(db, 'artifacts', appId, 'public', 'data', targetCollection, id), payload);
       } else {
-        // 備用方案
         if (type === 'product') setProducts(mode==='add'?[payload, ...products]:products.map(p=>p.id===id?payload:p));
         if (type === 'customer') setCustomers(mode==='add'?[payload, ...customers]:customers.map(c=>c.id===id?payload:c));
         if (type === 'user') setUsers(mode==='add'?[payload, ...users]:users.map(u=>u.id===id?payload:u));
       }
-      
       if (type === 'user' && currentUser && currentUser.id === id) setCurrentUser(payload);
       setEditModal({ isOpen: false, type: '', mode: 'add', data: null });
     } catch(err) { console.error(err); alert('資料儲存失敗'); }
@@ -290,13 +315,16 @@ export default function App() {
     } catch(err) { console.error(err); alert('資料刪除失敗'); }
   };
 
-  // --- UI ---
+  // ==========================================
+  // UI 渲染 (UI Rendering)
+  // ==========================================
+
   if (!isLoggedIn) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans relative">
         {isDbSyncing && (
            <div className="absolute top-4 right-4 bg-white px-4 py-2 rounded-lg shadow flex items-center gap-2 text-sm font-bold text-slate-500">
-             <Loader2 size={16} className="animate-spin text-blue-600" /> 資料庫同步中...
+             <Loader2 size={16} className="animate-spin text-blue-600" /> 雲端連線中...
            </div>
         )}
         <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden border border-slate-100">
@@ -307,15 +335,15 @@ export default function App() {
           <form onSubmit={handleLogin} className="p-8 space-y-6">
             {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm flex items-center gap-2 font-medium"><AlertCircle size={16} /> {loginError}</div>}
             <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">帳號</label>
-              <input type="text" required value={loginForm.username} onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="輸入 admin 或 sales01" />
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">登入帳號</label>
+              <input type="text" required value={loginForm.username} onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="請輸入登入帳號" />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">密碼</label>
               <input type="password" required value={loginForm.password} onChange={(e) => setLoginForm({...loginForm, password: e.target.value})} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="••••••••" />
             </div>
             <button type="submit" disabled={isDbSyncing} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold py-4 rounded-xl shadow-lg transition transform active:scale-[0.98]">
-              {isDbSyncing ? '系統連線中...' : '安全登入'}
+              {isDbSyncing ? '系統初始化中...' : '安全登入'}
             </button>
           </form>
         </div>
@@ -325,7 +353,8 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-sans text-slate-900">
-      {/* 側邊選單 */}
+      
+      {/* --- 左側導覽列 Sidebar --- */}
       <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col shrink-0">
         <div className="flex items-center gap-3 mb-10">
           <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center font-bold text-xl italic shadow-lg shadow-blue-500/20">L</div>
@@ -351,9 +380,9 @@ export default function App() {
         </div>
       </aside>
 
-      {/* 主內容區 */}
+      {/* --- 主要內容區 Main Content --- */}
       <main className="flex-grow p-4 md:p-8 overflow-y-auto max-h-screen relative">
-        {/* Loading Overlay for PDF */}
+        
         {isGeneratingPDF && (
           <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center rounded-2xl">
             <Loader2 size={48} className="animate-spin text-blue-600 mb-4" />
@@ -380,7 +409,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* 報價清單 (首頁) */}
+        {/* --- 畫面 1: 報價清單 --- */}
         {activeTab === 'quotes' && !isCreating && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <table className="w-full text-left">
@@ -408,11 +437,11 @@ export default function App() {
           </div>
         )}
 
-        {/* 報價單編輯介面 */}
+        {/* --- 畫面 2: 報價單編輯器 --- */}
         {activeTab === 'quotes' && isCreating && (
           <div className="space-y-6 max-w-5xl mx-auto">
             <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200">
-              {/* 表頭資訊 */}
+              
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-10 pb-10 border-b border-slate-100">
                 <div className="space-y-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">系統自動單號</label>
@@ -431,7 +460,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 產品快速加入器 */}
+              {/* 產品選擇器 */}
               <div className="mb-10 bg-slate-50 p-6 rounded-2xl border border-slate-200 border-dashed">
                 <h4 className="text-sm font-bold text-slate-700 mb-4 flex items-center gap-2"><Package size={18} className="text-blue-600"/> 產品快速檢索加入</h4>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
@@ -459,7 +488,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 報價清單 Table */}
+              {/* 加入項目的清單 */}
               <div className="space-y-3 mb-12">
                 <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">本次報價項目清單</h4>
                 {currentQuote.items.length === 0 ? (
@@ -497,7 +526,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* 總計與備註 */}
+              {/* 備註與金額 */}
               <div className="flex flex-col md:flex-row justify-between items-start gap-12 pt-10 border-t border-slate-200">
                 <div className="w-full md:max-w-md">
                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-3">報價特別備註 / 交易條款</label>
@@ -514,7 +543,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 動作按鈕 */}
             <div className="flex justify-between items-center bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
               <button onClick={() => setShowPreview(true)} className="flex items-center gap-2 px-6 py-3 bg-slate-100 rounded-xl font-bold text-slate-700 hover:bg-slate-200 transition"><Eye size={18} /> 預覽版面</button>
               <div className="flex gap-4">
@@ -527,12 +555,11 @@ export default function App() {
           </div>
         )}
 
-        {/* 產品庫管理 (Admin) */}
+        {/* --- 畫面 3: 產品庫管理 --- */}
         {activeTab === 'products' && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {products.map(p => (
               <div key={p.id} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 hover:shadow-lg hover:border-blue-200 transition group relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-24 h-24 bg-blue-50 rounded-bl-full -z-10 opacity-50 transition group-hover:bg-blue-100"></div>
                 <div className="flex justify-between items-start mb-4">
                   <span className="px-3 py-1 bg-blue-50 text-blue-700 rounded-lg text-[10px] font-black uppercase tracking-widest">{p.category}</span>
                   <div className="flex gap-2">
@@ -552,12 +579,12 @@ export default function App() {
           </div>
         )}
 
-        {/* 客戶管理 (Admin) */}
+        {/* --- 畫面 4: 客戶管理 --- */}
         {activeTab === 'customers' && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-slate-400 text-xs uppercase font-bold border-b border-slate-100 tracking-wider">
-                <tr><th className="px-6 py-5">公司資料</th><th className="px-6 py-5">主要聯絡人</th><th className="px-6 py-5">合約等級 / 折扣</th><th className="px-6 py-5">地址</th><th className="px-6 py-5 text-right">操作</th></tr>
+                <tr><th className="px-6 py-5">公司資料</th><th className="px-6 py-5">主要聯絡人</th><th className="px-6 py-5">合約等級 / 折扣</th><th className="px-6 py-5 text-right">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {customers.map(c => (
@@ -565,7 +592,6 @@ export default function App() {
                     <td className="px-6 py-4 font-black text-slate-800">{c.name}</td>
                     <td className="px-6 py-4"><p className="font-bold text-slate-700">{c.contact}</p><p className="text-xs text-slate-400">{c.email}</p></td>
                     <td className="px-6 py-4"><span className="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold mr-2">{c.level}</span><span className="font-mono font-bold text-slate-500">{(c.discount * 100).toFixed(0)}%</span></td>
-                    <td className="px-6 py-4 text-slate-500 text-xs font-medium">{c.address}</td>
                     <td className="px-6 py-4 flex justify-end gap-2">
                       <button onClick={() => openModal('customer', 'edit', c)} className="p-2 text-slate-400 hover:text-blue-600 transition bg-white border border-slate-200 shadow-sm rounded-lg"><Edit3 size={16} /></button>
                       <button onClick={() => handleDeleteItem('customer', c.id)} className="p-2 text-slate-400 hover:text-red-500 transition bg-white border border-slate-200 shadow-sm rounded-lg"><Trash2 size={16} /></button>
@@ -577,20 +603,18 @@ export default function App() {
           </div>
         )}
 
-        {/* 使用者管理 (Admin) */}
+        {/* --- 畫面 5: 帳號管理 --- */}
         {activeTab === 'users' && currentUser.role === 'Admin' && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <table className="w-full text-left">
               <thead className="bg-slate-50 text-slate-400 text-xs uppercase font-bold border-b border-slate-100 tracking-wider">
-                <tr><th className="px-6 py-5">員工姓名 / 信箱</th><th className="px-6 py-5">登入帳號</th><th className="px-6 py-5">系統權限</th><th className="px-6 py-5">所屬單位與電話</th><th className="px-6 py-5 text-right">操作</th></tr>
+                <tr><th className="px-6 py-5">員工姓名 / 信箱</th><th className="px-6 py-5">登入帳號</th><th className="px-6 py-5 text-right">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {users.map(u => (
                   <tr key={u.id} className="hover:bg-slate-50 transition text-sm">
                     <td className="px-6 py-4"><p className="font-black text-slate-800">{u.name}</p><p className="text-xs text-slate-500">{u.email}</p></td>
-                    <td className="px-6 py-4 font-mono font-bold text-blue-600 bg-blue-50/30 rounded inline-block mt-3 px-2 py-1">{u.username}</td>
-                    <td className="px-6 py-4"><span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest ${u.role === 'Admin' ? 'bg-red-50 text-red-600' : 'bg-slate-100 text-slate-600'}`}>{u.role}</span></td>
-                    <td className="px-6 py-4"><p className="font-bold text-slate-700">{u.company || '-'}</p><p className="text-xs text-slate-400">{u.contact || '-'}</p></td>
+                    <td className="px-6 py-4 font-mono font-bold text-blue-600">{u.username}</td>
                     <td className="px-6 py-4 flex justify-end gap-2">
                       <button onClick={() => openModal('user', 'edit', u)} className="p-2 text-slate-400 hover:text-blue-600 transition bg-white border border-slate-200 shadow-sm rounded-lg"><Edit3 size={16} /></button>
                       <button onClick={() => handleDeleteItem('user', u.id)} className="p-2 text-slate-400 hover:text-red-500 transition bg-white border border-slate-200 shadow-sm rounded-lg"><Trash2 size={16} /></button>
@@ -603,7 +627,9 @@ export default function App() {
         )}
       </main>
 
-      {/* 真實 PDF 預覽與渲染視窗 (隱藏卷軸) */}
+      {/* ========================================== */}
+      {/* 彈出視窗：PDF 預覽與渲染視窗 */}
+      {/* ========================================== */}
       {showPreview && (
         <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[500] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-4xl h-[95vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col relative">
@@ -613,9 +639,7 @@ export default function App() {
             </div>
             
             <div className="flex-grow bg-slate-300 p-8 overflow-y-auto flex justify-center">
-               {/* A4 比例畫布 - html2canvas 將精準截取此 div */}
                <div id="pdf-preview-content" className="bg-white w-[210mm] min-h-[297mm] p-16 text-slate-900 shadow-2xl shrink-0" style={{boxSizing: 'border-box'}}>
-                  {/* PDF Header */}
                   <div className="flex justify-between items-start border-b-4 border-slate-900 pb-10 mb-10">
                     <div>
                       <h1 className="text-5xl font-black italic tracking-tighter mb-4 text-slate-900">LUMENS</h1>
@@ -632,13 +656,11 @@ export default function App() {
                     </div>
                   </div>
                   
-                  {/* PDF Client Info */}
                   <div className="mb-12">
                     <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b-2 border-slate-100 pb-2 mb-4">客戶資訊 (Bill To)</h3>
                     <p className="text-3xl font-black text-slate-800">{currentQuote?.customerName || '未指定客戶'}</p>
                   </div>
 
-                  {/* PDF Table */}
                   <table className="w-full text-left mb-16 border-collapse">
                     <thead className="bg-slate-900 text-white">
                        <tr className="text-sm font-bold uppercase tracking-widest"><th className="p-4 rounded-tl-lg">產品型號 (SKU)</th><th className="p-4">產品說明 (Description)</th><th className="p-4 text-center">數量 (QTY)</th><th className="p-4 text-right rounded-tr-lg">小計 (Amount)</th></tr>
@@ -655,7 +677,6 @@ export default function App() {
                     </tbody>
                   </table>
 
-                  {/* PDF Totals */}
                   <div className="flex justify-end mb-16">
                     <div className="w-80 space-y-4">
                       <div className="flex justify-between font-bold text-slate-600"><span>小計 (Subtotal)</span><span>{CURRENCIES[currentQuote?.currency || 'CNY'].symbol} {totals.subtotal.toLocaleString()}</span></div>
@@ -666,18 +687,9 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-
-                  {/* PDF Footer Notes */}
-                  {currentQuote?.notes && (
-                     <div className="border-t-2 border-slate-100 pt-8">
-                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">條款與備註 (Terms & Notes)</h4>
-                       <p className="text-sm font-bold text-slate-600 whitespace-pre-wrap">{currentQuote.notes}</p>
-                     </div>
-                  )}
                </div>
             </div>
             
-            {/* Modal Bottom Actions (僅非自動下載時顯示) */}
             {!isGeneratingPDF && !isCreating && (
                <div className="p-6 bg-white border-t flex justify-end">
                   <button onClick={() => downloadAsPDF(currentQuote)} className="flex items-center gap-2 px-8 py-3 bg-blue-600 text-white font-bold rounded-xl shadow-lg hover:bg-blue-700 transition">
@@ -689,7 +701,9 @@ export default function App() {
         </div>
       )}
 
-      {/* CRUD 共用編輯彈窗 */}
+      {/* ========================================== */}
+      {/* 彈出視窗：CRUD 共用編輯彈窗 */}
+      {/* ========================================== */}
       {editModal.isOpen && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[600] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col">
@@ -700,8 +714,6 @@ export default function App() {
               <button onClick={() => setEditModal({ isOpen: false, type: '', mode: 'add', data: null })} className="p-2 hover:bg-slate-200 rounded-full transition"><X size={20}/></button>
             </div>
             <form onSubmit={handleSaveItem} className="p-8 overflow-y-auto max-h-[70vh]">
-              
-              {/* Product Form */}
               {editModal.type === 'product' && (
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-5">
@@ -711,7 +723,7 @@ export default function App() {
                     </div>
                     <div className="space-y-2">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">產品系列</label>
-                      <input type="text" required value={editModal.data.category} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, category: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: VC攝像機" />
+                      <input type="text" required value={editModal.data.category} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, category: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                   <div className="space-y-2">
@@ -719,17 +731,11 @@ export default function App() {
                     <input type="text" required value={editModal.data.name} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, name: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">規格說明</label>
-                    <textarea required value={editModal.data.spec} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, spec: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500 h-24" />
-                  </div>
-                  <div className="space-y-2">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">標準定價 (CNY)</label>
                     <input type="number" required min="0" value={editModal.data.price} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, price: parseFloat(e.target.value) || 0 } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-black text-blue-600 text-lg outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                 </div>
               )}
-
-              {/* Customer Form */}
               {editModal.type === 'customer' && (
                 <div className="space-y-5">
                   <div className="space-y-2">
@@ -741,71 +747,19 @@ export default function App() {
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">聯絡人</label>
                       <input type="text" required value={editModal.data.contact} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, contact: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">電子信箱</label>
-                      <input type="email" required value={editModal.data.email} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, email: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">合約等級</label>
-                      <input type="text" required value={editModal.data.level} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, level: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="經銷商 A" />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">折扣率 (1.0 = 原價)</label>
-                      <input type="number" step="0.01" required min="0" max="1" value={editModal.data.discount} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, discount: parseFloat(e.target.value) || 1 } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-black text-blue-600 outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">聯絡地址</label>
-                    <input type="text" required value={editModal.data.address} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, address: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                 </div>
               )}
-
-              {/* User Form */}
               {editModal.type === 'user' && (
                 <div className="space-y-5">
                   <div className="grid grid-cols-2 gap-5">
                     <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">登入帳號 (ID)</label>
-                      <input type="text" required value={editModal.data.username} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, username: e.target.value } })} disabled={editModal.mode === 'edit'} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">密碼設定</label>
-                      <input type="password" required={editModal.mode === 'add'} placeholder={editModal.mode === 'edit' ? "修改請輸入新密碼" : ""} value={editModal.data.password} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, password: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">真實姓名</label>
-                      <input type="text" required value={editModal.data.name} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, name: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">系統權限</label>
-                      <select value={editModal.data.role} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, role: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
-                        <option value="User">一般使用者 (User)</option>
-                        <option value="Admin">管理者 (Admin)</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">所屬單位 (公司)</label>
-                    <input type="text" value={editModal.data.company} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, company: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">聯絡電話</label>
-                      <input type="text" value={editModal.data.contact} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, contact: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">電子信箱</label>
-                      <input type="email" value={editModal.data.email} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, email: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-medium text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">登入帳號</label>
+                      <input type="text" required value={editModal.data.username} onChange={e => setEditModal({ ...editModal, data: { ...editModal.data, username: e.target.value } })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                 </div>
               )}
-              
               <div className="mt-10 flex justify-end gap-3">
                 <button type="button" onClick={() => setEditModal({ isOpen: false, type: '', mode: 'add', data: null })} className="px-6 py-3 font-bold text-slate-500 hover:text-slate-700">取消</button>
                 <button type="submit" className="px-10 py-3 bg-blue-600 text-white rounded-xl font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition">確認儲存</button>
