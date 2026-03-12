@@ -10,7 +10,10 @@ import {
 // --- Firebase 初始化設定 ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import { 
+  getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc,
+  getDocs, query, where, updateDoc
+} from 'firebase/firestore';
 
 let app, auth, db, appId = 'default-app-id';
 try {
@@ -88,6 +91,20 @@ const loadScript = (src) => new Promise((resolve, reject) => {
   document.head.appendChild(script);
 });
 
+const APP_VERSION = 'V1.5.01';
+
+const toTenantId = (company) => {
+  const raw = (company || '').trim();
+  if (!raw) return 'default-tenant';
+  const slug = raw
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return slug || 'default-tenant';
+};
+
 export default function App() {
   const [fbUser, setFbUser] = useState(null);
   const [isDbSyncing, setIsDbSyncing] = useState(!!auth);
@@ -102,7 +119,8 @@ export default function App() {
   const [products, setProducts] = useState(INITIAL_PRODUCTS);
   const [customers, setCustomers] = useState(INITIAL_CUSTOMERS);
   const [users, setUsers] = useState(INITIAL_USERS);
-  const [quotes, setQuotes] = useState([]);
+  const [quotes, setQuotes] = useState([]); // latest-only view
+  const [quoteDocs, setQuoteDocs] = useState([]); // all versions
   const [currency, setCurrency] = useState('CNY');
   
   const [isCreating, setIsCreating] = useState(false);
@@ -110,6 +128,8 @@ export default function App() {
   const [showPreview, setShowPreview] = useState(false);
   const [tempSelection, setTempSelection] = useState({ category: '', sku: '', name: '' });
   const [editModal, setEditModal] = useState({ isOpen: false, type: '', mode: 'add', data: null });
+  const [historyModal, setHistoryModal] = useState({ isOpen: false, quoteNo: '' });
+  const [tenantId, setTenantId] = useState('default-tenant');
 
   // --- Firebase 登入邏輯 ---
   useEffect(() => {
@@ -134,6 +154,12 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // --- Multi-tenant: derive tenantId from logged-in user ---
+  useEffect(() => {
+    if (!currentUser) return;
+    setTenantId(toTenantId(currentUser.company));
+  }, [currentUser]);
+
   // --- Firebase 資料庫同步邏輯 ---
   useEffect(() => {
     if (!fbUser || !db) return;
@@ -147,6 +173,15 @@ export default function App() {
       }
     };
 
+    const checkAndSeedTenant = (snap, tenantCollectionName, initialData, setter) => {
+      const tenantPath = ['artifacts', appId, 'public', 'data', 'tenants', tenantId, tenantCollectionName];
+      if (snap.empty) {
+        initialData.forEach(item => setDoc(doc(db, ...tenantPath, item.id), { ...item, tenantId }));
+      } else {
+        setter(snap.docs.map(d => d.data()));
+      }
+    };
+
     const handleFirestoreError = (err) => {
       console.error("Firestore 存取錯誤:", err);
       setIsDbSyncing(false);
@@ -155,21 +190,73 @@ export default function App() {
     const unsubProducts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'products'), 
       snap => checkAndSeed(snap, 'products', INITIAL_PRODUCTS, setProducts), handleFirestoreError);
       
-    const unsubCustomers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'customers'), 
-      snap => checkAndSeed(snap, 'customers', INITIAL_CUSTOMERS, setCustomers), handleFirestoreError);
+    // Customers are tenant-scoped
+    const customersTenantCol = collection(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'customers');
+    const unsubCustomers = onSnapshot(customersTenantCol, 
+      snap => checkAndSeedTenant(snap, 'customers', INITIAL_CUSTOMERS, setCustomers), handleFirestoreError);
       
     const unsubUsers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'users'), 
       snap => checkAndSeed(snap, 'users', INITIAL_USERS, setUsers), handleFirestoreError);
       
-    const unsubQuotes = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'quotes'), 
+    // Quotes are tenant-scoped (and versioned)
+    const quotesTenantCol = collection(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'quotes');
+    const unsubQuotes = onSnapshot(quotesTenantCol, 
       snap => {
-        const fetchedQuotes = snap.docs.map(d => d.data()).sort((a,b) => b.id.localeCompare(a.id));
-        setQuotes(fetchedQuotes);
+        const fetched = snap.docs.map(d => d.data());
+        setQuoteDocs(fetched);
+        // Derive latest-only list (prefer explicit latest flag; otherwise max version per quoteNo)
+        const byQuoteNo = new Map();
+        for (const q of fetched) {
+          const quoteNo = q.quoteNo || q.id;
+          const version = Number(q.version || 1);
+          const cur = byQuoteNo.get(quoteNo);
+          const isLatestFlag = q.latest === true;
+          if (!cur) {
+            byQuoteNo.set(quoteNo, q);
+            continue;
+          }
+          const curVersion = Number(cur.version || 1);
+          const curLatestFlag = cur.latest === true;
+          if (isLatestFlag && !curLatestFlag) byQuoteNo.set(quoteNo, q);
+          else if (isLatestFlag === curLatestFlag && version > curVersion) byQuoteNo.set(quoteNo, q);
+        }
+        const latestList = Array.from(byQuoteNo.values()).sort((a, b) => (b.quoteNo || b.id).localeCompare(a.quoteNo || a.id));
+        setQuotes(latestList);
         setIsDbSyncing(false);
       }, handleFirestoreError);
 
+    // Safe migration: if tenant customers/quotes are empty but legacy has data, copy once (no deletes).
+    const migrateLegacyIfNeeded = async () => {
+      try {
+        const tenantCustomersSnap = await getDocs(customersTenantCol);
+        if (tenantCustomersSnap.empty) {
+          const legacyCustomersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'customers'));
+          if (!legacyCustomersSnap.empty) {
+            await Promise.all(legacyCustomersSnap.docs.map(d => setDoc(doc(customersTenantCol, d.id), { ...d.data(), tenantId })));
+          }
+        }
+
+        const tenantQuotesSnap = await getDocs(quotesTenantCol);
+        if (tenantQuotesSnap.empty) {
+          const legacyQuotesSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'quotes'));
+          if (!legacyQuotesSnap.empty) {
+            await Promise.all(legacyQuotesSnap.docs.map(d => {
+              const data = d.data();
+              const quoteNo = data.quoteNo || data.id;
+              const version = Number(data.version || 1);
+              const docId = `${quoteNo}_v${version}`;
+              return setDoc(doc(quotesTenantCol, docId), { ...data, quoteNo, version, tenantId, latest: true });
+            }));
+          }
+        }
+      } catch (e) {
+        console.warn('Legacy migration skipped/failed:', e);
+      }
+    };
+    migrateLegacyIfNeeded();
+
     return () => { unsubProducts(); unsubCustomers(); unsubUsers(); unsubQuotes(); };
-  }, [fbUser]);
+  }, [fbUser, tenantId]);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -191,8 +278,14 @@ export default function App() {
   };
 
   const startNewQuote = () => {
+    const quoteNo = generateQuoteID();
     setCurrentQuote({
-      id: generateQuoteID(), version: 1, createdAt: new Date().toLocaleDateString(),
+      id: quoteNo,
+      quoteNo,
+      version: 1,
+      latest: true,
+      tenantId,
+      createdAt: new Date().toLocaleDateString(),
       expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString(),
       customerName: '', userName: '', companyName: 'Lumens 科技',
       items: [], status: '已報價', currency: currency, taxRate: 0.05, notes: '', history: []
@@ -266,7 +359,41 @@ export default function App() {
 
     try {
       if (db && fbUser) {
-        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'quotes', currentQuote.id), currentQuote);
+        const quoteNo = currentQuote.quoteNo || currentQuote.id;
+        const quotesTenantCol = collection(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'quotes');
+
+        // Find current latest version for this quoteNo
+        const latestQ = query(quotesTenantCol, where('quoteNo', '==', quoteNo), where('latest', '==', true));
+        const latestSnap = await getDocs(latestQ);
+        let nextVersion = 1;
+        let prevLatestDocRef = null;
+        let prevLatestData = null;
+        if (!latestSnap.empty) {
+          const d = latestSnap.docs[0];
+          prevLatestDocRef = d.ref;
+          prevLatestData = d.data();
+          nextVersion = Number(prevLatestData.version || 1) + 1;
+        }
+
+        // Mark previous latest as not latest
+        if (prevLatestDocRef) {
+          await updateDoc(prevLatestDocRef, { latest: false, supersededAt: new Date().toISOString() });
+        }
+
+        const payload = {
+          ...currentQuote,
+          id: quoteNo,
+          quoteNo,
+          version: nextVersion,
+          latest: true,
+          tenantId,
+          savedAt: new Date().toISOString(),
+        };
+        const docId = `${quoteNo}_v${nextVersion}`;
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'quotes', docId), payload);
+
+        // Update local currentQuote (so PDF filename and preview show correct version)
+        setCurrentQuote(payload);
       } else {
         setQuotes([currentQuote, ...quotes]); 
       }
@@ -301,7 +428,11 @@ export default function App() {
 
     try {
       if (db && fbUser) {
-        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', targetCollection, id), payload);
+        if (type === 'customer') {
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'customers', id), { ...payload, tenantId });
+        } else {
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', targetCollection, id), payload);
+        }
       } else {
         if (type === 'product') setProducts(mode==='add'?[payload, ...products]:products.map(p=>p.id===id?payload:p));
         if (type === 'customer') setCustomers(mode==='add'?[payload, ...customers]:customers.map(c=>c.id===id?payload:c));
@@ -318,7 +449,11 @@ export default function App() {
 
     try {
       if (db && fbUser) {
-        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', targetCollection, id));
+        if (type === 'customer') {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tenants', tenantId, 'customers', id));
+        } else {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', targetCollection, id));
+        }
       } else {
          if (type === 'product') setProducts(products.filter(p => p.id !== id));
          if (type === 'customer') setCustomers(customers.filter(c => c.id !== id));
@@ -385,6 +520,9 @@ export default function App() {
         <button onClick={checkFirebaseStatus} className="text-slate-400 text-sm hover:text-blue-600 hover:underline bg-white px-4 py-2 rounded-full shadow-sm">
           👉 點我測試雲端資料庫連線狀態
         </button>
+        <div className="absolute bottom-4 right-4 text-xs font-mono font-bold text-slate-400">
+          {APP_VERSION}
+        </div>
       </div>
     );
   }
@@ -458,13 +596,15 @@ export default function App() {
                 {quotes.length === 0 ? <tr><td colSpan="5" className="px-6 py-16 text-center text-slate-400 font-medium">資料庫中尚無報價單記錄</td></tr> : (
                   quotes.map(q => (
                     <tr key={q.id} className="hover:bg-blue-50/50 transition text-sm group">
-                      <td className="px-6 py-4 font-mono font-bold text-blue-600">{q.id}</td>
+                      <td className="px-6 py-4 font-mono font-bold text-blue-600">{q.quoteNo || q.id} <span className="text-slate-400 font-black text-xs ml-2">v{q.version || 1}</span></td>
                       <td className="px-6 py-4"><p className="font-bold text-slate-800">{q.customerName || '未指定'}</p><p className="text-xs text-slate-400">{q.createdAt}</p></td>
                       <td className="px-6 py-4 font-medium text-slate-600">{q.userName}</td>
                       <td className="px-6 py-4 font-black text-right text-slate-800">{CURRENCIES[q.currency].symbol} {calculateTotals(q).total.toLocaleString()}</td>
                       <td className="px-6 py-4">
                         <div className="flex justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button onClick={() => {setCurrentQuote(q); setShowPreview(true);}} className="p-2 bg-white text-slate-500 hover:text-blue-600 border border-slate-200 shadow-sm rounded-lg" title="預覽與下載"><Eye size={16} /></button>
+                          <button onClick={() => { setCurrentQuote({ ...q, id: q.quoteNo || q.id, quoteNo: q.quoteNo || q.id }); setIsCreating(true); }} className="p-2 bg-white text-slate-500 hover:text-emerald-600 border border-slate-200 shadow-sm rounded-lg" title="修改並建立新版本"><Edit3 size={16} /></button>
+                          <button onClick={() => setHistoryModal({ isOpen: true, quoteNo: q.quoteNo || q.id })} className="p-2 bg-white text-slate-500 hover:text-slate-900 border border-slate-200 shadow-sm rounded-lg" title="歷史版本"><History size={16} /></button>
                         </div>
                       </td>
                     </tr>
@@ -754,6 +894,43 @@ export default function App() {
                   </button>
                </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* 彈出視窗：報價歷史版本清單 */}
+      {/* ========================================== */}
+      {historyModal.isOpen && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[650] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-6 border-b flex justify-between items-center bg-slate-50">
+              <div>
+                <h3 className="font-black text-lg text-slate-800 flex items-center gap-2"><History size={18} className="text-slate-700"/> 歷史版本</h3>
+                <p className="text-xs text-slate-500 font-mono mt-1">{historyModal.quoteNo}</p>
+              </div>
+              <button onClick={() => setHistoryModal({ isOpen: false, quoteNo: '' })} className="p-2 hover:bg-slate-200 rounded-full transition"><X size={20}/></button>
+            </div>
+            <div className="p-6 max-h-[60vh] overflow-y-auto">
+              {quoteDocs.filter(d => (d.quoteNo || d.id) === historyModal.quoteNo).sort((a,b) => Number(b.version||1) - Number(a.version||1)).map((v) => (
+                <div key={`${historyModal.quoteNo}_v${v.version||1}`} className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 mb-3 hover:bg-slate-50 transition">
+                  <div>
+                    <div className="font-black text-slate-800">v{v.version || 1} {v.latest ? <span className="ml-2 text-[10px] bg-emerald-50 text-emerald-700 px-2 py-1 rounded-full font-black">最新</span> : null}</div>
+                    <div className="text-xs text-slate-500 mt-1">{v.customerName || '未指定'} · {v.createdAt}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setCurrentQuote(v); setShowPreview(true); }} className="p-2 bg-white text-slate-500 hover:text-blue-600 border border-slate-200 shadow-sm rounded-lg" title="預覽"><Eye size={16} /></button>
+                    <button onClick={() => downloadAsPDF(v)} className="p-2 bg-white text-slate-500 hover:text-slate-900 border border-slate-200 shadow-sm rounded-lg" title="下載 PDF"><Download size={16} /></button>
+                  </div>
+                </div>
+              ))}
+              {quoteDocs.filter(d => (d.quoteNo || d.id) === historyModal.quoteNo).length === 0 && (
+                <div className="py-10 text-center text-slate-400 font-medium">找不到任何歷史版本</div>
+              )}
+            </div>
+            <div className="p-6 border-t bg-white flex justify-end">
+              <button onClick={() => setHistoryModal({ isOpen: false, quoteNo: '' })} className="px-6 py-3 font-bold text-slate-500 hover:text-slate-700">關閉</button>
+            </div>
           </div>
         </div>
       )}
